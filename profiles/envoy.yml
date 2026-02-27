@@ -18,10 +18,12 @@ preferences:
     preferenceType: string
     definition:
       stringType: text
+      default: "192.168.1.50"
   - name: authToken
     title: Enphase API Token
-    description: "Paste your 1-year JWT token generated from entrez.enphaseenergy.com"
+    description: "Paste your 1-year JWT token from entrez.enphaseenergy.com"
     required: true
     preferenceType: string
     definition:
       stringType: text
+      default: "paste_token_here"
