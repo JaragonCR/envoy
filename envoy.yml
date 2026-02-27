@@ -1,0 +1,15 @@
+preferences:
+  - name: ipAddress
+    title: Envoy IP Address
+    description: "The local IPv4 address of your Enphase Envoy."
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+  - name: authToken
+    title: Enphase API Token
+    description: "Paste your 1-year JWT token generated from entrez.enphaseenergy.com"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
