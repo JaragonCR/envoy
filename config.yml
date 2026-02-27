@@ -1,0 +1,4 @@
+name: "Envoy Local"
+packageKey: "envoy-local-driver"
+permissions:
+  - lan
