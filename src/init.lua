@@ -50,14 +50,11 @@ local function query_envoy(device)
     return
   end
 
-  log.debug("[ENVOY] Token length: " .. #token ..
-            " (part1=" .. #t1 .. ", part2=" .. #t2 .. ")")
-
   local data = https_get(ip, "/production.json", token)
   if not data then return end
 
   -- --------------------------------------------------------
-  -- PRODUCTION — use type=eim for accurate meter data
+  -- PRODUCTION — type=eim has accurate meter data
   -- --------------------------------------------------------
   local prod_w_now    = 0
   local prod_wh_today = 0
@@ -66,82 +63,59 @@ local function query_envoy(device)
 
   for _, entry in ipairs(data.production or {}) do
     if entry.type == "eim" then
-      prod_w_now    = entry.wNow            or 0
-      prod_wh_today = entry.whToday         or 0
-      prod_wh_7day  = entry.whLastSevenDays or 0
-      prod_wh_life  = entry.whLifetime      or 0
+      -- clamp negative nighttime values to 0
+      prod_w_now    = math.max(entry.wNow            or 0, 0)
+      prod_wh_today = math.max(entry.whToday         or 0, 0)
+      prod_wh_7day  = math.max(entry.whLastSevenDays or 0, 0)
+      prod_wh_life  = math.max(entry.whLifetime      or 0, 0)
       break
     end
   end
 
   -- --------------------------------------------------------
-  -- CONSUMPTION — total-consumption and net-consumption
+  -- CONSUMPTION
   -- --------------------------------------------------------
   local cons_w_now    = 0
   local cons_wh_today = 0
-  local net_w_now     = 0   -- positive = importing, negative = exporting
+  local net_w_now     = 0
 
   for _, entry in ipairs(data.consumption or {}) do
     if entry.measurementType == "total-consumption" then
-      cons_w_now    = entry.wNow    or 0
-      cons_wh_today = entry.whToday or 0
+      cons_w_now    = math.max(entry.wNow    or 0, 0)
+      cons_wh_today = math.max(entry.whToday or 0, 0)
     elseif entry.measurementType == "net-consumption" then
       net_w_now = entry.wNow or 0
     end
   end
 
-  -- --------------------------------------------------------
-  -- Grid direction: positive = importing, negative = exporting
-  -- --------------------------------------------------------
   local grid_label = net_w_now >= 0 and "importing" or "exporting"
 
   log.info(string.format(
-    "[ENVOY] Solar: %.0fW | Home: %.0fW | Grid: %.0fW (%s) | Solar today: %.2f kWh | Home today: %.2f kWh",
-    prod_w_now, cons_w_now, math.abs(net_w_now), grid_label,
-    prod_wh_today / 1000, cons_wh_today / 1000
+    "[ENVOY] Solar: %.0fW | Home: %.0fW | Grid: %.0fW (%s)",
+    prod_w_now, cons_w_now, math.abs(net_w_now), grid_label
   ))
-
-  log.debug(string.format(
-    "[ENVOY] 7-day: %.2f kWh | Lifetime: %.2f kWh",
+  log.info(string.format(
+    "[ENVOY] Today → Solar: %.2f kWh | Home: %.2f kWh | 7-day: %.1f kWh | Lifetime: %.1f kWh",
+    prod_wh_today / 1000, cons_wh_today / 1000,
     prod_wh_7day / 1000, prod_wh_life / 1000
   ))
 
   -- --------------------------------------------------------
   -- Emit to SmartThings
+  -- main component     = Solar Production
+  -- consumed component = Home Consumption
   -- --------------------------------------------------------
+  device:emit_event(capabilities.powerMeter.power({ value = prod_w_now, unit = "W" }))
+  device:emit_event(capabilities.energyMeter.energy({ value = prod_wh_today / 1000, unit = "kWh" }))
 
-  -- Solar production (main tile)
-  device:emit_event(capabilities.powerMeter.power({
-    value = prod_w_now, unit = "W"
-  }))
-  device:emit_event(capabilities.energyMeter.energy({
-    value = prod_wh_today / 1000, unit = "kWh"
-  }))
-
-  -- Home consumption via powerConsumptionReport
-  -- (standard ST capability used by energy monitoring devices)
-  local ok_cons = pcall(function()
-    device:emit_event(capabilities.powerConsumptionReport.powerConsumption({
-      energy          = math.floor(cons_wh_today),
-      power           = math.floor(cons_w_now),
-      deltaEnergy     = 0,
-      persistedEnergy = 0,
-      energySaved     = 0,
-      powerSaved      = 0
-    }))
-  end)
-
-  if not ok_cons then
-    log.warn(string.format(
-      "[ENVOY] Consumption (add powerConsumptionReport to profile): %.0fW now, %.2f kWh today",
-      cons_w_now, cons_wh_today / 1000
-    ))
-  end
-
-  log.debug(string.format(
-    "[ENVOY] Grid: %.0fW %s | Home today: %.2f kWh",
-    math.abs(net_w_now), grid_label, cons_wh_today / 1000
-  ))
+  device:emit_component_event(
+    device.profile.components.consumed,
+    capabilities.powerMeter.power({ value = cons_w_now, unit = "W" })
+  )
+  device:emit_component_event(
+    device.profile.components.consumed,
+    capabilities.energyMeter.energy({ value = cons_wh_today / 1000, unit = "kWh" })
+  )
 end
 
 -- ==========================================================
@@ -149,9 +123,7 @@ end
 -- ==========================================================
 local function discovery_handler(driver, _, should_continue)
   if not should_continue() then return end
-
   log.info("[ENVOY] Discovery triggered. Creating Envoy device...")
-
   driver:try_create_device({
     type              = "LAN",
     device_network_id = "envoy-local-manual-1",
