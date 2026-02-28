@@ -1,7 +1,7 @@
 local Driver = require("st.driver")
 local capabilities = require("st.capabilities")
 local log = require("log")
-local https = require("cosock.ssl.https") -- Swapped HTTP for HTTPS
+local https = require("cosock.ssl.https")
 local ltn12 = require("ltn12")
 local json = require("st.json")
 
@@ -10,21 +10,25 @@ local json = require("st.json")
 -- ==========================================================
 local function query_envoy(device)
   local ip = device.preferences.ipAddress
-  local token = device.preferences.authToken
   
+  -- Concatenate split token, trimming any accidental whitespace
+  local t1 = device.preferences.authToken1 or ""
+  local t2 = device.preferences.authToken2 or ""
+  local token = (t1 .. t2):match("^%s*(.-)%s*$")
+
   -- Prevent executing if preferences are missing
-  if not ip or ip == "" or not token or token == "" then
-    log.warn("Envoy IP address or Token not set in preferences. Skipping query.")
+  if not ip or ip == "" or token == "" then
+    log.warn("Envoy IP or Token not set in preferences. Skipping query.")
     return
   end
-  
-  -- Updated to HTTPS
+
+  log.debug("Token length: " .. #token .. " (part1=" .. #t1 .. ", part2=" .. #t2 .. ")")
+
   local url = "https://" .. ip .. "/api/v1/production"
-  log.info("Querying Envoy at URL: " .. url)
-  
+  log.info("Querying Envoy at: " .. url)
+
   local response_body = {}
-  
-  -- Make the HTTPS GET request
+
   local success, code, headers, status = https.request({
     url = url,
     method = "GET",
@@ -33,44 +37,35 @@ local function query_envoy(device)
       ["Accept"] = "application/json",
       ["Authorization"] = "Bearer " .. token
     },
-    -- Crucial for local devices: Ignores self-signed certificate errors
     protocol = "any",
-    verify = "none" 
+    verify = "none"
   })
 
-  -- Check if the request was successful
-  -- Note: success is nil if the network request fails entirely
   if type(code) ~= "number" or code ~= 200 then
-    log.error("HTTPS Request Failed. HTTP Code: " .. tostring(code) .. " Status: " .. tostring(status))
+    log.error("HTTPS Request Failed. Code: " .. tostring(code) .. " Status: " .. tostring(status))
     return
   end
 
-  -- Combine the response chunks into a single string
   local response_string = table.concat(response_body)
-  
-  -- Parse the JSON safely
   local parsed_success, data = pcall(json.decode, response_string)
-  
+
   if not parsed_success then
     log.error("Failed to parse JSON response from Envoy.")
+    log.debug("Raw body: " .. response_string)
     return
   end
 
-  -- Extract data (based on standard Envoy /api/v1/production output)
   local current_power_watts = data.wattsNow
   local today_energy_wh = data.wattHoursToday
 
   if current_power_watts and today_energy_wh then
-    -- Convert Watt-hours to Kilowatt-hours for the ST Energy capability
     local today_energy_kwh = today_energy_wh / 1000.0
-
-    log.info("Envoy Data -> Power: " .. current_power_watts .. "W, Energy Today: " .. today_energy_kwh .. "kWh")
-
-    -- Emit the events to SmartThings so the UI updates
+    log.info("Poll OK -> Power: " .. current_power_watts .. "W, Energy: " .. today_energy_kwh .. "kWh")
     device:emit_event(capabilities.powerMeter.power({ value = current_power_watts, unit = "W" }))
     device:emit_event(capabilities.energyMeter.energy({ value = today_energy_kwh, unit = "kWh" }))
   else
-    log.warn("JSON parsed successfully, but expected data fields ('wattsNow' or 'wattHoursToday') were missing.")
+    log.warn("JSON parsed OK but missing 'wattsNow' or 'wattHoursToday' fields.")
+    log.debug("Raw body: " .. response_string)
   end
 end
 
@@ -79,19 +74,19 @@ end
 -- ==========================================================
 local function discovery_handler(driver, _, should_continue)
   if not should_continue() then return end
-  
-  log.info("Discovery triggered. Creating manual Envoy device...")
-  
+
+  log.info("Discovery triggered. Creating Envoy device...")
+
   local device_metadata = {
     type = "LAN",
     device_network_id = "envoy-local-manual-1",
     label = "Enphase Envoy",
-    profile = "envoy-local-power", -- Ensure this matches your .yml profile name exactly
+    profile = "envoy-local-power",
     manufacturer = "Enphase",
     model = "Envoy Local",
     vendor_provided_label = "Envoy Solar Gateway"
   }
-  
+
   driver:try_create_device(device_metadata)
 end
 
@@ -100,18 +95,16 @@ end
 -- ==========================================================
 local function device_init(driver, device)
   log.info("Envoy device initialized: " .. device.id)
-  
-  -- Start a polling loop to check the Envoy every 5 minutes (300 seconds)
   device.thread:call_on_schedule(300, function()
     query_envoy(device)
   end, "EnvoyPollingThread")
 end
 
 local function info_changed(driver, device, event, args)
-  -- If either the IP or Token changed in settings, trigger an immediate refresh
-  if args.old_st_store.preferences.ipAddress ~= device.preferences.ipAddress or 
-     args.old_st_store.preferences.authToken ~= device.preferences.authToken then
-    log.info("Preferences updated. Triggering new query.")
+  if args.old_st_store.preferences.ipAddress ~= device.preferences.ipAddress or
+     args.old_st_store.preferences.authToken1 ~= device.preferences.authToken1 or
+     args.old_st_store.preferences.authToken2 ~= device.preferences.authToken2 then
+    log.info("Preferences updated. Triggering immediate query.")
     query_envoy(device)
   end
 end
