@@ -37,7 +37,7 @@ local function https_get(ip, path, token)
 end
 
 -- ==========================================================
--- Core Poll: /production.json (single call, all data)
+-- Core Poll
 -- ==========================================================
 local function query_envoy(device)
   local ip = device.preferences.ipAddress
@@ -54,7 +54,7 @@ local function query_envoy(device)
   if not data then return end
 
   -- --------------------------------------------------------
-  -- PRODUCTION — type=eim has accurate meter data
+  -- PRODUCTION (type=eim)
   -- --------------------------------------------------------
   local prod_w_now    = 0
   local prod_wh_today = 0
@@ -63,7 +63,6 @@ local function query_envoy(device)
 
   for _, entry in ipairs(data.production or {}) do
     if entry.type == "eim" then
-      -- clamp negative nighttime values to 0
       prod_w_now    = math.max(entry.wNow            or 0, 0)
       prod_wh_today = math.max(entry.whToday         or 0, 0)
       prod_wh_7day  = math.max(entry.whLastSevenDays or 0, 0)
@@ -77,7 +76,7 @@ local function query_envoy(device)
   -- --------------------------------------------------------
   local cons_w_now    = 0
   local cons_wh_today = 0
-  local net_w_now     = 0
+  local net_w_now     = 0   -- negative = exporting, positive = importing
 
   for _, entry in ipairs(data.consumption or {}) do
     if entry.measurementType == "total-consumption" then
@@ -88,11 +87,18 @@ local function query_envoy(device)
     end
   end
 
-  local grid_label = net_w_now >= 0 and "importing" or "exporting"
+  -- --------------------------------------------------------
+  -- GRID DIRECTION
+  -- net_w_now < 0 → exporting to grid (solar > home)
+  -- net_w_now > 0 → importing from grid (home > solar)
+  -- --------------------------------------------------------
+  local grid_abs    = math.abs(net_w_now)
+  local exporting   = net_w_now < 0
+  local grid_label  = exporting and "Exporting to Grid" or "Importing from Grid"
 
   log.info(string.format(
-    "[ENVOY] Solar: %.0fW | Home: %.0fW | Grid: %.0fW (%s)",
-    prod_w_now, cons_w_now, math.abs(net_w_now), grid_label
+    "[ENVOY] Solar: %.0fW | Home: %.0fW | %s: %.0fW",
+    prod_w_now, cons_w_now, grid_label, grid_abs
   ))
   log.info(string.format(
     "[ENVOY] Today → Solar: %.2f kWh | Home: %.2f kWh | 7-day: %.1f kWh | Lifetime: %.1f kWh",
@@ -101,13 +107,18 @@ local function query_envoy(device)
   ))
 
   -- --------------------------------------------------------
-  -- Emit to SmartThings
-  -- main component     = Solar Production
-  -- consumed component = Home Consumption
+  -- EMIT: main → Solar Production
   -- --------------------------------------------------------
-  device:emit_event(capabilities.powerMeter.power({ value = prod_w_now, unit = "W" }))
-  device:emit_event(capabilities.energyMeter.energy({ value = prod_wh_today / 1000, unit = "kWh" }))
+  device:emit_event(capabilities.powerMeter.power({
+    value = prod_w_now, unit = "W"
+  }))
+  device:emit_event(capabilities.energyMeter.energy({
+    value = prod_wh_today / 1000, unit = "kWh"
+  }))
 
+  -- --------------------------------------------------------
+  -- EMIT: consumed → Home Consumption
+  -- --------------------------------------------------------
   device:emit_component_event(
     device.profile.components.consumed,
     capabilities.powerMeter.power({ value = cons_w_now, unit = "W" })
@@ -116,6 +127,28 @@ local function query_envoy(device)
     device.profile.components.consumed,
     capabilities.energyMeter.energy({ value = cons_wh_today / 1000, unit = "kWh" })
   )
+
+  -- --------------------------------------------------------
+  -- EMIT: grid → net flow
+  -- powerMeter = absolute wattage (always positive, automatable)
+  -- switch = on means exporting, off means importing
+  --   → use in automations: "when grid switch is ON" = sending to grid
+  -- --------------------------------------------------------
+  device:emit_component_event(
+    device.profile.components.grid,
+    capabilities.powerMeter.power({ value = grid_abs, unit = "W" })
+  )
+
+  -- switch ON = exporting (solar surplus), OFF = importing (drawing from grid)
+  device:emit_component_event(
+    device.profile.components.grid,
+    exporting and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+  )
+
+  -- Label flips in logs — ST doesn't support dynamic component labels natively
+  -- but the switch state + powerMeter value together give full automation capability
+  log.debug(string.format("[ENVOY] Grid component: %.0fW | switch=%s (%s)",
+    grid_abs, exporting and "ON" or "OFF", grid_label))
 end
 
 -- ==========================================================
@@ -158,9 +191,16 @@ end
 
 -- ==========================================================
 -- Capability Handlers
+-- switch commands on grid component are read-only (no physical action)
 -- ==========================================================
 local function handle_refresh(driver, device, command)
   log.info("[ENVOY] Manual refresh triggered")
+  query_envoy(device)
+end
+
+local function handle_switch(driver, device, command)
+  -- Grid switch is read-only — just re-poll to reflect real state
+  log.debug("[ENVOY] Grid switch command ignored (read-only), re-polling")
   query_envoy(device)
 end
 
@@ -176,6 +216,10 @@ local envoy_driver = Driver("envoy-local", {
   capability_handlers = {
     [capabilities.refresh.ID] = {
       [capabilities.refresh.commands.refresh.NAME] = handle_refresh,
+    },
+    [capabilities.switch.ID] = {
+      [capabilities.switch.commands.on.NAME]  = handle_switch,
+      [capabilities.switch.commands.off.NAME] = handle_switch,
     }
   }
 })
