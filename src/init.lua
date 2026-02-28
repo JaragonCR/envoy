@@ -85,7 +85,7 @@ local function discovery_handler(driver, _, should_continue)
   local device_metadata = {
     type = "LAN",
     device_network_id = "envoy-local-manual-1",
-    name = "Enphase Envoy",
+    label = "Enphase Envoy",
     profile = "envoy-local-power", -- Ensure this matches your .yml profile name exactly
     manufacturer = "Enphase",
     model = "Envoy Local",
