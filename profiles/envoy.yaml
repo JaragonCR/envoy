@@ -20,6 +20,15 @@ components:
         version: 1
     categories:
       - name: CurbPowerMeter
+  - id: grid
+    label: Grid
+    capabilities:
+      - id: powerMeter
+        version: 1
+      - id: switch
+        version: 1
+    categories:
+      - name: CurbPowerMeter
 preferences:
   - name: ipAddress
     title: Envoy IP Address
