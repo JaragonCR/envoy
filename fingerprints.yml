@@ -1,0 +1,4 @@
+profiles:
+  - id: envoy-local-power
+    deviceLabel: Enphase Envoy
+    deviceProfileName: envoy-local-power
