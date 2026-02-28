@@ -9,7 +9,7 @@ components:
       - id: refresh
         version: 1
     categories:
-      - name: Other
+      - name: SmallAppliances
 preferences:
   - name: ipAddress
     title: Envoy IP Address
