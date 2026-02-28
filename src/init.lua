@@ -174,7 +174,7 @@ end
 local function device_init(driver, device)
   log.info("[ENVOY] Device initialized: " .. device.id)
   query_envoy(device)
-  device.thread:call_on_schedule(300, function()
+  device.thread:call_on_schedule(30, function()
     query_envoy(device)
   end, "EnvoyPollingThread")
 end
