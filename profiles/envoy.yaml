@@ -54,3 +54,10 @@ preferences:
     definition:
       stringType: text
       default: ""
+  - name: noCTs
+    title: "No CT Clamps Installed"
+    description: "Enable if your Envoy has no current transformer (CT) clamps. Production is sourced from inverter reports. Consumption and grid export detection are unavailable."
+    required: false
+    preferenceType: boolean
+    definition:
+      default: false

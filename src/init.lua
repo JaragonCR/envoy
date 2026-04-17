@@ -54,36 +54,59 @@ local function query_envoy(device)
   if not data then return end
 
   -- --------------------------------------------------------
-  -- PRODUCTION (type=eim)
+  -- PRODUCTION
+  -- CT mode:    type=eim from /production.json (metered, full history)
+  -- No-CT mode: sum lastReportWatts from /api/v1/production/inverters
+  --             for current watts; whLifetime from type=inverters aggregate;
+  --             whToday and whLastSevenDays are not available without CTs
   -- --------------------------------------------------------
+  local no_cts = device.preferences.noCTs == true
   local prod_w_now    = 0
   local prod_wh_today = 0
   local prod_wh_7day  = 0
   local prod_wh_life  = 0
 
-  for _, entry in ipairs(data.production or {}) do
-    if entry.type == "eim" then
-      prod_w_now    = math.max(entry.wNow            or 0, 0)
-      prod_wh_today = math.max(entry.whToday         or 0, 0)
-      prod_wh_7day  = math.max(entry.whLastSevenDays or 0, 0)
-      prod_wh_life  = math.max(entry.whLifetime      or 0, 0)
-      break
+  if no_cts then
+    local inverters = https_get(ip, "/api/v1/production/inverters", token)
+    if inverters then
+      for _, inv in ipairs(inverters) do
+        prod_w_now = prod_w_now + math.max(inv.lastReportWatts or 0, 0)
+      end
+    end
+    for _, entry in ipairs(data.production or {}) do
+      if entry.type == "inverters" then
+        prod_wh_life = math.max(entry.whLifetime or 0, 0)
+        break
+      end
+    end
+  else
+    for _, entry in ipairs(data.production or {}) do
+      if entry.type == "eim" then
+        prod_w_now    = math.max(entry.wNow            or 0, 0)
+        prod_wh_today = math.max(entry.whToday         or 0, 0)
+        prod_wh_7day  = math.max(entry.whLastSevenDays or 0, 0)
+        prod_wh_life  = math.max(entry.whLifetime      or 0, 0)
+        break
+      end
     end
   end
 
   -- --------------------------------------------------------
   -- CONSUMPTION
+  -- Skipped when noCTs=true — no CT clamps means no consumption data
   -- --------------------------------------------------------
   local cons_w_now    = 0
   local cons_wh_today = 0
   local net_w_now     = 0   -- negative = exporting, positive = importing
 
-  for _, entry in ipairs(data.consumption or {}) do
-    if entry.measurementType == "total-consumption" then
-      cons_w_now    = math.max(entry.wNow    or 0, 0)
-      cons_wh_today = math.max(entry.whToday or 0, 0)
-    elseif entry.measurementType == "net-consumption" then
-      net_w_now = entry.wNow or 0
+  if not no_cts then
+    for _, entry in ipairs(data.consumption or {}) do
+      if entry.measurementType == "total-consumption" then
+        cons_w_now    = math.max(entry.wNow    or 0, 0)
+        cons_wh_today = math.max(entry.whToday or 0, 0)
+      elseif entry.measurementType == "net-consumption" then
+        net_w_now = entry.wNow or 0
+      end
     end
   end
 
@@ -96,15 +119,26 @@ local function query_envoy(device)
   local exporting   = net_w_now < 0
   local grid_label  = exporting and "Exporting to Grid" or "Importing from Grid"
 
-  log.info(string.format(
-    "[ENVOY] Solar: %.0fW | Home: %.0fW | %s: %.0fW",
-    prod_w_now, cons_w_now, grid_label, grid_abs
-  ))
-  log.info(string.format(
-    "[ENVOY] Today → Solar: %.2f kWh | Home: %.2f kWh | 7-day: %.1f kWh | Lifetime: %.1f kWh",
-    prod_wh_today / 1000, cons_wh_today / 1000,
-    prod_wh_7day / 1000, prod_wh_life / 1000
-  ))
+  if no_cts then
+    log.info(string.format(
+      "[ENVOY] Solar (inverters): %.0fW | Consumption: N/A (no CTs) | Grid direction: unknown",
+      prod_w_now
+    ))
+    log.info(string.format(
+      "[ENVOY] Lifetime → Solar: %.1f kWh | Today/7-day not available without CTs",
+      prod_wh_life / 1000
+    ))
+  else
+    log.info(string.format(
+      "[ENVOY] Solar: %.0fW | Home: %.0fW | %s: %.0fW",
+      prod_w_now, cons_w_now, grid_label, grid_abs
+    ))
+    log.info(string.format(
+      "[ENVOY] Today → Solar: %.2f kWh | Home: %.2f kWh | 7-day: %.1f kWh | Lifetime: %.1f kWh",
+      prod_wh_today / 1000, cons_wh_today / 1000,
+      prod_wh_7day / 1000, prod_wh_life / 1000
+    ))
+  end
 
   -- --------------------------------------------------------
   -- EMIT: main → Solar Production
@@ -113,7 +147,7 @@ local function query_envoy(device)
     value = prod_w_now, unit = "W"
   }))
   device:emit_event(capabilities.energyMeter.energy({
-    value = prod_wh_today / 1000, unit = "kWh"
+    value = no_cts and (prod_wh_life / 1000) or (prod_wh_today / 1000), unit = "kWh"
   }))
 
   -- --------------------------------------------------------
@@ -139,16 +173,22 @@ local function query_envoy(device)
     capabilities.powerMeter.power({ value = grid_abs, unit = "W" })
   )
 
-  -- switch ON = exporting (solar surplus), OFF = importing (drawing from grid)
-  device:emit_component_event(
-    device.profile.components.grid,
-    exporting and capabilities.switch.switch.on() or capabilities.switch.switch.off()
-  )
-
-  -- Label flips in logs — ST doesn't support dynamic component labels natively
-  -- but the switch state + powerMeter value together give full automation capability
-  log.debug(string.format("[ENVOY] Grid component: %.0fW | switch=%s (%s)",
-    grid_abs, exporting and "ON" or "OFF", grid_label))
+  -- No CTs = grid direction unknown; lock switch OFF and stop auto-toggling
+  if no_cts then
+    device:emit_component_event(
+      device.profile.components.grid,
+      capabilities.switch.switch.off()
+    )
+    log.debug("[ENVOY] Grid component: no CTs — switch locked OFF, wattage unknown")
+  else
+    -- switch ON = exporting (solar surplus), OFF = importing (drawing from grid)
+    device:emit_component_event(
+      device.profile.components.grid,
+      exporting and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+    )
+    log.debug(string.format("[ENVOY] Grid component: %.0fW | switch=%s (%s)",
+      grid_abs, exporting and "ON" or "OFF", grid_label))
+  end
 end
 
 -- ==========================================================
@@ -183,7 +223,8 @@ local function info_changed(driver, device, event, args)
   local old = args.old_st_store.preferences
   if old.ipAddress  ~= device.preferences.ipAddress  or
      old.authToken1 ~= device.preferences.authToken1 or
-     old.authToken2 ~= device.preferences.authToken2 then
+     old.authToken2 ~= device.preferences.authToken2 or
+     old.noCTs      ~= device.preferences.noCTs      then
     log.info("[ENVOY] Preferences updated — triggering immediate poll")
     query_envoy(device)
   end

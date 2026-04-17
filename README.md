@@ -14,6 +14,8 @@ The driver creates a single **Enphase Envoy** device in SmartThings with three c
 | `consumed` | Home Consumption | `/production.json` → `consumption[total-consumption]` | Current watts + today kWh |
 | `grid` | Grid | `/production.json` → `consumption[net-consumption]` | Absolute watts + direction switch |
 
+> **No CT clamps installed?** See [No CT Clamps Mode](#no-ct-clamps-mode) — the data sources and available fields differ.
+
 ### Grid Component
 The `grid` component uses two capabilities together to represent flow direction without negative numbers:
 
@@ -115,6 +117,25 @@ Open the device in the ST app → tap **⋮** → **Settings**:
 | **API Token (Part 1)** | First half of your JWT token |
 | **API Token (Part 2)** | Second half of your JWT token |
 
+### No CT Clamps Mode
+
+If your Envoy has no current transformer (CT) clamps installed, enable **No CT Clamps Installed** in the device settings. This switches the driver to inverter-based data sources.
+
+| Field | Available | Source |
+|---|---|---|
+| Solar watts now | Yes | Sum of `lastReportWatts` across all inverters (`/api/v1/production/inverters`) |
+| Solar lifetime kWh | Yes | `production[type=inverters].whLifetime` from `/production.json` |
+| Solar today kWh | **No** | Not available without CTs |
+| Solar 7-day kWh | **No** | Not available without CTs |
+| Home consumption | **No** | Requires CT clamps |
+| Grid export/import | **No** | Requires CT clamps — grid switch is locked OFF |
+
+The `consumed` component will show 0W / 0 kWh. The `grid` component will show 0W with the switch permanently OFF. The `main` (Solar Production) energy tile shows **lifetime kWh** instead of today kWh.
+
+Each poll cycle makes two HTTP calls in this mode: `/production.json` for lifetime energy and `/api/v1/production/inverters` for current wattage.
+
+---
+
 ### Splitting the Token
 
 The ST app truncates long text fields, so the token must be split in two. Find the midpoint and paste each half:
@@ -163,7 +184,7 @@ To renew:
 
 ## Data Source
 
-All data comes from a single local API call per poll cycle:
+**CT mode (default):** single call per poll cycle:
 
 ```
 GET https://<ENVOY_IP>/production.json
@@ -179,9 +200,23 @@ GET https://<ENVOY_IP>/production.json
 | `consumption[total-consumption].whToday` | Home consumption kWh today |
 | `consumption[net-consumption].wNow` | Net grid flow (negative = exporting) |
 
-The driver uses `production[type=eim]` (the energy meter) rather than `production[type=inverters]` for production data, as the EIM provides accurate metered values including reactive power and true RMS measurements.
+The driver uses `production[type=eim]` (the energy meter) for production data, as the EIM provides accurate metered values including reactive power and true RMS measurements.
 
-Polling interval: every **5 minutes**. An immediate poll fires on driver init and on any preference change.
+**No-CT mode:** two calls per poll cycle:
+
+```
+GET https://<ENVOY_IP>/production.json
+GET https://<ENVOY_IP>/api/v1/production/inverters
+```
+
+| Field | Used For |
+|---|---|
+| Sum of `[*].lastReportWatts` | Solar watts now (sum of all 40 inverter reports) |
+| `production[type=inverters].whLifetime` | Solar kWh lifetime |
+
+Today and 7-day energy fields are not provided by either inverter endpoint and are unavailable without CT clamps.
+
+Polling interval: every **30 seconds**. An immediate poll fires on driver init and on any preference change.
 
 ---
 
